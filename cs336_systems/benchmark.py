@@ -79,7 +79,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
     
     # Actual trials
     times = []
-    torch.cuda.cudart().cudaProfilerStart()
+    #torch.cuda.cudart().cudaProfilerStart()
     for trial in range(num_trials):
         nvtx.range_push(f"step_{trial}")
         
@@ -109,8 +109,8 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         end = default_timer()
         times.append((end - start))
 
-    torch.cuda.cudart().cudaProfilerStop()
-    return {'Mean (Forward)': mean(times), 'Std (Forward)':stdev(times)}
+    #torch.cuda.cudart().cudaProfilerStop()
+    return {f'Mean ({mode.capitalize()})': mean(times), f'Std ({mode.capitalize()})':stdev(times)}
 
 
 if __name__ == '__main__':
@@ -156,10 +156,19 @@ if __name__ == '__main__':
         'Context Length': args.seq_len
     }
 
-    result |= benchmark_model(
+    try:
+        stats = benchmark_model(
             args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward'
         )
+        result |= stats
     
+        
+    except RuntimeError as e:
+        
+        if 'out of memory' in str(e):
+            print(f"{args.size} model with context length {args.seq_len} tokens ran out of memory")
+        result |= {'Mean (Forward)': 'Out of memory', 'Std (Forward)': 'Out of memory'}
+
     df = pd.DataFrame([result])
     if os.path.exists(save_path):
         old = pd.read_csv(save_path)
@@ -168,5 +177,6 @@ if __name__ == '__main__':
     df.to_csv(save_path, index=False)
     print('\nResults:')
     print(df.to_markdown(index=False))
-
+        
+    
 
