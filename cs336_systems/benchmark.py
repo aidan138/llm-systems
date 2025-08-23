@@ -12,6 +12,8 @@ import torch.cuda.nvtx as nvtx
 from jaxtyping import Float, Bool
 from torch import Tensor
 import math
+import pandas as pd
+import os
 
 MODEL_SPECS = {
     'small': {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
@@ -20,6 +22,10 @@ MODEL_SPECS = {
     'xl': {"d_model": 1600, "d_ff": 6400, "num_layers": 48, "num_heads": 25},
     '2.7B': {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
 }
+
+CSV_PATH = './model_csvs'
+
+os.makedirs(CSV_PATH, exist_ok=True)
 
 @nvtx.range("Scaled dot product attention")
 def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
@@ -42,8 +48,9 @@ def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
     return output
 
 @nvtx.range('Benchmarking model')
-def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =True, num_warmups: int = 5, num_trials: int = 10):
+def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    x.to(device)
     targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) if mode == 'forward-backward' else None
 
     with nvtx.range('Initializing model'):
@@ -103,7 +110,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         times.append((end - start))
 
     torch.cuda.cudart().cudaProfilerStop()
-    return {'mean': mean(times), 'std':stdev(times)}
+    return {'Mean (Forward)': mean(times), 'Std (Forward)':stdev(times)}
 
 
 if __name__ == '__main__':
@@ -131,6 +138,8 @@ if __name__ == '__main__':
     parser.add_argument("--num-heads", type=int, default=4)
 
     args = parser.parse_args()
+
+    save_path = f"{CSV_PATH}/model_stats.csv"
     if args.size:
         kwargs = dict(args._get_kwargs()) | MODEL_SPECS[args.size]
     else:
@@ -142,8 +151,22 @@ if __name__ == '__main__':
     with nvtx.range("define input"):
         x = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len))
     
-    stats_dict = benchmark_model(
-            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials
-        )
+    result = {
+        'Size': args.size,
+        'Context Length': args.seq_len
+    }
 
-    print(f"The avg {args.mode} time: {stats_dict['mean']} | std {stats_dict['std']}")
+    result |= benchmark_model(
+            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward'
+        )
+    
+    df = pd.DataFrame([result])
+    if os.path.exists(save_path):
+        old = pd.read_csv(save_path)
+        df = pd.concat([old, df], ignore_index=True)
+    
+    df.to_csv(save_path, index=False)
+    print('\nResults:')
+    print(df.to_markdown(index=False))
+
+

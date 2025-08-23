@@ -40,6 +40,14 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Data
+nsys_logs/
+slurm_logs/
+model_csvs/
+*.nsys-rep
+*.sqlite
+
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -61,7 +69,6 @@ cover/
 
 # Django stuff:
 *.log
-*.nsys-rep
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
