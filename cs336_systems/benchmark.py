@@ -52,13 +52,13 @@ def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
 def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10, mixed_prec: bool = False):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     x.to(device)
-    targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) if mode == 'forward-backward' else None
-
+    targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) 
+    backward = True if mode == 'forward-backward' else False
     with nvtx.range('Initializing model'):
         transformer = TransformerLM(model_args).to(device)
     optimizer = AdamW(transformer.parameters()) if use_optim else None
 
-    prec_context = torch.autocast(device_type=device, dtype=torch.float16) if mixed_prec else nullcontext()
+    prec_context = torch.autocast(device_type=device, dtype=torch.bfloat16) if mixed_prec else nullcontext()
     # Warmup trials
     for _ in range(num_warmups):
 
@@ -71,7 +71,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
             logits = transformer(x) # B, N, V
             loss = cross_entropy_loss(logits, targs)
 
-        if targs is not None:
+        if backward:
             loss.backward()
 
         if optimizer:
@@ -83,6 +83,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
     # Actual trials
     times = []
     #torch.cuda.cudart().cudaProfilerStart()
+    #torch.cuda.memory._record_memory_history(max_entries=1000000)
     for trial in range(num_trials):
         nvtx.range_push(f"step_{trial}")
         
@@ -99,7 +100,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
                 loss = cross_entropy_loss(logits, targs)
 
             
-        if targs is not None:
+        if backward:
             with nvtx.range("backward pass"):
                 loss.backward()
 
@@ -115,6 +116,8 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         times.append((end - start))
 
     #torch.cuda.cudart().cudaProfilerStop()
+    # torch.cuda.memory._dump_snapshot().pickle("memory_snapshot.pickle")
+    # torch.cuda.memory._record_memory_history(enabled=None)
     return {f'Mean ({mode.capitalize()})': mean(times), f'Std ({mode.capitalize()})':stdev(times)}
 
 
@@ -186,4 +189,3 @@ if __name__ == '__main__':
     print('\nResults:')
     print(df.to_markdown(index=False))
         
-    
