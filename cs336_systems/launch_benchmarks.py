@@ -10,8 +10,12 @@ os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(NSYS_DIR, exist_ok=True)
 
 # Define the sweep 
-sizes = ['small', 'medium', 'large', 'xl', '2.7B']
-context_lengths = [128, 256, 512, 1024]
+sizes = ['small'
+#, 'medium', 'large', 'xl'
+]
+context_lengths = [128
+#,256, 512, 1024
+]
 mode = 'forward-backward'
 
 jobs = []
@@ -26,16 +30,17 @@ def run_benchmark(job):
     cmd = (
         # 
         f'uv run '
-        #f"nsys profile "
-        #f"--pytorch autograd-nvtx "
-        #f"--python-backtrace=cuda "
-        #f"--sample=none --cpuctxsw=none"
+        f"nsys profile "
+
+        f"--pytorch autograd-nvtx "
+        f"--python-backtrace=cuda "
+        # f"--sample=none --cpuctxsw=none "
 
 
         # Configs found online
-        #f"-w true -t cuda,nvtx,osrt,cudnn,cublas -s cpu  --capture-range=cudaProfilerApi --cudabacktrace=true -x true "
-        #f"-o {output} "
-        f"python cs336_systems/benchmark.py "
+        f"-w true -t cuda,nvtx,osrt,cudnn,cublas -s cpu  --capture-range=cudaProfilerApi --cudabacktrace=true -x true "
+        f"-o {output} "
+        f"python ./cs336_systems/launch_benchmarks.py "
         f"--size {size} "
         f"--mode {mode} "
         f"--seq-len {cl} "

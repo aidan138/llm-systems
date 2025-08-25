@@ -14,6 +14,7 @@ from torch import Tensor
 import math
 import pandas as pd
 import os
+from contextlib import nullcontext
 
 MODEL_SPECS = {
     'small': {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
@@ -48,7 +49,7 @@ def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
     return output
 
 @nvtx.range('Benchmarking model')
-def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10):
+def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10, mixed_prec: bool = False):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     x.to(device)
     targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) if mode == 'forward-backward' else None
@@ -57,6 +58,7 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         transformer = TransformerLM(model_args).to(device)
     optimizer = AdamW(transformer.parameters()) if use_optim else None
 
+    prec_context = torch.autocast(device_type=device, dtype=torch.float16) if mixed_prec else nullcontext()
     # Warmup trials
     for _ in range(num_warmups):
 
@@ -64,11 +66,12 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
             optimizer.zero_grad()
         else:
             transformer.zero_grad(set_to_none=True)
-
-        logits = transformer(x) # B, N, V
+        
+        with prec_context:
+            logits = transformer(x) # B, N, V
+            loss = cross_entropy_loss(logits, targs)
 
         if targs is not None:
-            loss = cross_entropy_loss(logits, targs)
             loss.backward()
 
         if optimizer:
@@ -91,10 +94,12 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         start = default_timer()
 
         with nvtx.range("forward pass"):
-            logits = transformer(x)
+            with prec_context:
+                logits = transformer(x)
+                loss = cross_entropy_loss(logits, targs)
+
             
         if targs is not None:
-            loss = cross_entropy_loss(logits, targs)
             with nvtx.range("backward pass"):
                 loss.backward()
 
@@ -136,10 +141,12 @@ if __name__ == '__main__':
     parser.add_argument("--d-ff", type=int)
     parser.add_argument("--num-layers", type=int)
     parser.add_argument("--num-heads", type=int, default=4)
+    parser.add_argument("-o", type=str, default=None)
+    parser.add_argument("--prec", type=str, choices=['full', 'bfloat16'], default='full')
 
     args = parser.parse_args()
 
-    save_path = f"{CSV_PATH}/model_stats.csv"
+    save_path = f"{CSV_PATH}/{args.o}.csv" if args.o else None
     if args.size:
         kwargs = dict(args._get_kwargs()) | MODEL_SPECS[args.size]
     else:
@@ -158,7 +165,7 @@ if __name__ == '__main__':
 
     try:
         stats = benchmark_model(
-            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward'
+            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward', mixed_prec=args.prec=='bfloat16'
         )
         result |= stats
     
@@ -170,13 +177,13 @@ if __name__ == '__main__':
         result |= {'Mean (Forward)': 'Out of memory', 'Std (Forward)': 'Out of memory'}
 
     df = pd.DataFrame([result])
-    if os.path.exists(save_path):
+    if save_path and os.path.exists(save_path):
         old = pd.read_csv(save_path)
         df = pd.concat([old, df], ignore_index=True)
-    
-    df.to_csv(save_path, index=False)
+    if save_path:
+        df.to_csv(save_path, index=False)
+
     print('\nResults:')
     print(df.to_markdown(index=False))
         
     
-
