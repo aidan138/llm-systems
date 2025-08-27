@@ -58,7 +58,7 @@ def benchmark_attn(head_dim: int, seq_len: int, bsz: int=8, warmup_iters: int=5,
         b_end = default_timer()
         backward_times.append((b_end - b_start))
 
-    return {'Head Dimension': head_dim, 'Sequence Length': seq_len, 'Forward Memory': mem_before_backward,
+    return {'Head Dimension': head_dim, 'Sequence Length': seq_len, 'Forward Memory (MB)': mem_before_backward / (1024**2),
             'Total Forward Time': sum(forward_times), 'Avg Forward Pass': mean(forward_times), 'Forward Pass Std': stdev(forward_times),
             'Total Backward Time': sum(backward_times), 'Avg Backward Pass': mean(backward_times), 'Backward Pass Std': stdev(backward_times)}
 
