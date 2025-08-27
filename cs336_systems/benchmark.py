@@ -26,8 +26,10 @@ MODEL_SPECS = {
 }
 
 CSV_PATH = './model_csvs'
+MEM_PATH = './mem_pkls'
 
 os.makedirs(CSV_PATH, exist_ok=True)
+os.makedirs(MEM_PATH, exist_ok=True)
 
 @nvtx.range("Scaled dot product attention")
 def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
@@ -61,7 +63,10 @@ def print_mem(msg=""):
     gc.collect()
 
 @nvtx.range('Benchmarking model')
-def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10, mixed_prec: bool = False):
+def benchmark_model(
+    mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10,
+    mixed_prec: bool = False, mem_fpath: str = None
+):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     x.to(device)
     targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) 
@@ -96,7 +101,8 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
     # Actual trials
     times = []
     #torch.cuda.cudart().cudaProfilerStart()
-    #torch.cuda.memory._record_memory_history(max_entries=1000000)
+    if mem_fpath:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
     for trial in range(num_trials):
         nvtx.range_push(f"step_{trial}")
         
@@ -132,8 +138,9 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
         times.append((end - start))
 
     #torch.cuda.cudart().cudaProfilerStop()
-    # torch.cuda.memory._dump_snapshot().pickle("memory_snapshot.pickle")
-    # torch.cuda.memory._record_memory_history(enabled=None)
+    if mem_fpath:
+        torch.cuda.memory._dump_snapshot(mem_fpath)
+        torch.cuda.memory._record_memory_history(enabled=None)
     stats = {f'Mean (forward)': mean(times), f'Std (forward)':stdev(times)}
     if backward_times:
         stats |= {f'Mean (backward)': mean(backward_times), f'Std (backward)':stdev(backward_times)}
@@ -165,10 +172,15 @@ if __name__ == '__main__':
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("-o", type=str, default=None)
     parser.add_argument("--prec", type=str, choices=['full', 'bfloat16'], default='full')
-
+    parser.add_argument("--mem", type=bool, choices=[True, False], help='Track memory or not', default=False)
     args = parser.parse_args()
 
     save_path = f"{CSV_PATH}/{args.o}.csv" if args.o else None
+    if args.mem:
+        mem_fpath = f'{MEM_PATH}/{args.size}_{args.prec}_{args.seq_len}.pickle'
+    else:
+        mem_fpath = None
+
     if args.size:
         kwargs = dict(args._get_kwargs()) | MODEL_SPECS[args.size]
     else:
@@ -176,7 +188,7 @@ if __name__ == '__main__':
 
     model_args = ModelArgs(**kwargs)
     cs336_basics.nn.layers.sdp_attention = annotated_sdp
-
+    
     with nvtx.range("define input"):
         x = torch.randint(0, args.vocab_size, (args.batch_size, args.seq_len))
     
@@ -187,11 +199,10 @@ if __name__ == '__main__':
 
     try:
         stats = benchmark_model(
-            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward', mixed_prec=args.prec=='bfloat16'
+            args.mode, model_args, x=x, num_warmups=args.num_warmups, num_trials=args.num_trials, use_optim=args.mode=='forward-backward', mixed_prec=args.prec=='bfloat16', mem_fpath=mem_fpath
         )
         result |= stats
     
-        
     except RuntimeError as e:
         
         if 'out of memory' in str(e):

@@ -44,6 +44,7 @@ pip-delete-this-directory.txt
 nsys_logs/
 slurm_logs/
 model_csvs/
+mem_pkls/
 *.nsys-rep
 *.sqlite
 
