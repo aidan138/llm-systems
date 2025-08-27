@@ -176,24 +176,28 @@ class Multiheaded_Self_Attention(nn.Module):
 
 class Parallel_Multiheaded_Self_Attention(nn.Module):
     
-    def __init__(self, model_args: ModelArgs):
+    def __init__(self, model_args: ModelArgs, use_cache = False):
         super().__init__()
         self.head_dim = model_args.d_model // model_args.num_heads
         self.num_heads = model_args.num_heads
         self.kqv_proj = nn.Parameter(torch.stack([Linear(self.head_dim*self.num_heads, model_args.d_model).weight.data for _ in range(3)], dim=0))
         self.output_proj = Linear(model_args.d_model, model_args.d_model)
         self.num_kv_heads = self.num_heads if model_args.num_kv_heads is None else model_args.num_kv_heads
+        self.max_batch_size = model_args.max_batch_size
+        self.max_seq_len = model_args.max_seq_len
+        self.use_cache = use_cache
         
-        # KV cache init
-        self.register_buffer("k_cache", torch.zeros((model_args.num_kv_heads,
-                                                     model_args.max_batch_size,
-                                                     model_args.max_seq_len,
-                                                     self.head_dim)), persistent=False) # TODO look into different dims for kq and v
-        
-        self.register_buffer("v_cache", torch.zeros((model_args.num_kv_heads,
-                                                     model_args.max_batch_size,
-                                                     model_args.max_seq_len,
-                                                     self.head_dim)), persistent=False)
+        # init caches to None to save mem while training
+        self.register_buffer("k_cache", None, persistent=False)
+        self.register_buffer("v_cache", None, persistent=False)
+
+    # KV cache init
+    def _init_cache(self, max_bsz, device, dtype):
+        if self.k_cache is None or self.k_cache.size(1) < max_bsz:
+            self.k_cache = torch.zeros(
+                (self.num_kv_heads, max_bsz, self.max_seq_len, self.head_dim), device=device, dtype=dtype
+            )
+            self.v_cache = torch.zeros_like(self.k_cache)
             
 
     def forward(self, x: Tensor, positional_embeddings: RoPE = None, start_pos:int = 0):
@@ -205,7 +209,6 @@ class Parallel_Multiheaded_Self_Attention(nn.Module):
         # to be broadcasted to the 3 KQV dims.
         # Unsqueezing the KQV (1, 3, num_head * head_dim, d_model) allowed for the KQV to be broadcasted across all batches
         transformed = (x.unsqueeze(-3) @ self.kqv_proj.permute((0,2,1)).unsqueeze(0)).permute(1,0,2,3)
-        
         
         # We get an output from the matmul of batch_size, seq_len, num_heads * head_dim
         # We then view for batch_size, seq_len, num_heads, head_dim
@@ -222,7 +225,8 @@ class Parallel_Multiheaded_Self_Attention(nn.Module):
             key = positional_embeddings(key, token_positions)
 
 
-        if not self.training:
+        if not self.training and self.use_cache:
+            self._init_cache(batch_size, key.device, key.dtype)
             # Save to kv_cache
             self.k_cache[:, :batch_size, start_pos:last_pos] = key
             self.v_cache[:, :batch_size, start_pos:last_pos] = value
@@ -235,7 +239,6 @@ class Parallel_Multiheaded_Self_Attention(nn.Module):
         attended = sdp_attention(query, key, value, mask = mask) # Apply attention -> num_heads, batch, seq_len, head_dim
         attended = attended.permute(1, 2, 0, 3).reshape(batch_size, seq_len, -1) # undo the permutation -> batch, seq_len, d_model
         attended = self.output_proj(attended).view(batch_size, seq_len, d_model)
-        
         return attended
 
 class Transformer_Block(nn.Module):
@@ -280,3 +283,7 @@ class TransformerLM(nn.Module):
         if not self.training:
             self.current_pos += seq_len
         return x
+
+    def activate_cache(self):
+        for block in self.transformer_blocks:
+            block.attn.use_cache = True
