@@ -15,6 +15,7 @@ import math
 import pandas as pd
 import os
 from contextlib import nullcontext
+import gc
 
 MODEL_SPECS = {
     'small': {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
@@ -48,12 +49,24 @@ def annotated_sdp(Q: Float[Tensor, " ... queries d_k"],
 
     return output
 
+def tensor_bytes(t): return t.numel() * t.element_size()
+
+def print_mem(msg=""):
+    torch.cuda.synchronize()
+    print(msg)
+    print("allocated:", torch.cuda.memory_allocated() / (1024**3), "GB")
+    print("reserved: ", torch.cuda.memory_reserved() / (1024**3), "GB")
+    print("max allocated:", torch.cuda.max_memory_allocated() / (1024**3), "GB")
+    print(torch.cuda.memory_summary()[:1000])
+    gc.collect()
+
 @nvtx.range('Benchmarking model')
 def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim: bool =False, num_warmups: int = 5, num_trials: int = 10, mixed_prec: bool = False):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     x.to(device)
     targs = torch.randint(low=0, high=x.max().item(), size=(x.shape[0],1)).to(device) 
-    backward = True if mode == 'forward-backward' else False
+    backward = mode == 'forward-backward'
+    backward_times = []
     with nvtx.range('Initializing model'):
         transformer = TransformerLM(model_args).to(device)
     optimizer = AdamW(transformer.parameters()) if use_optim else None
@@ -98,11 +111,15 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
             with prec_context:
                 logits = transformer(x)
                 loss = cross_entropy_loss(logits, targs)
+        end = default_timer()
 
             
         if backward:
             with nvtx.range("backward pass"):
+                back_start = default_timer()
                 loss.backward()
+                back_end = default_timer()
+                backward_times.append((back_end - back_start))
 
         if optimizer:
             with nvtx.range("optimizer step"):
@@ -112,13 +129,15 @@ def benchmark_model(mode: str, model_args: ModelArgs, x: torch.Tensor, use_optim
             torch.cuda.synchronize()
 
         nvtx.range_pop()
-        end = default_timer()
         times.append((end - start))
 
     #torch.cuda.cudart().cudaProfilerStop()
     # torch.cuda.memory._dump_snapshot().pickle("memory_snapshot.pickle")
     # torch.cuda.memory._record_memory_history(enabled=None)
-    return {f'Mean ({mode.capitalize()})': mean(times), f'Std ({mode.capitalize()})':stdev(times)}
+    stats = {f'Mean (forward)': mean(times), f'Std (forward)':stdev(times)}
+    if backward_times:
+        stats |= {f'Mean (backward)': mean(backward_times), f'Std (backward)':stdev(backward_times)}
+    return stats
 
 
 if __name__ == '__main__':
