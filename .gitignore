@@ -45,6 +45,7 @@ nsys_logs/
 slurm_logs/
 model_csvs/
 mem_pkls/
+attn_stats/
 *.nsys-rep
 *.sqlite
 

@@ -117,6 +117,8 @@ def benchmark_model(
             with prec_context:
                 logits = transformer(x)
                 loss = cross_entropy_loss(logits, targs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize() # Wait for CUDA threads to finish
         end = default_timer()
 
             
@@ -124,8 +126,11 @@ def benchmark_model(
             with nvtx.range("backward pass"):
                 back_start = default_timer()
                 loss.backward()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize() # Wait for CUDA threads to finish
                 back_end = default_timer()
                 backward_times.append((back_end - back_start))
+                
 
         if optimizer:
             with nvtx.range("optimizer step"):
