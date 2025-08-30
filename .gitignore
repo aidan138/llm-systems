@@ -48,6 +48,8 @@ mem_pkls/
 attn_stats/
 *.nsys-rep
 *.sqlite
+cs336_systems/toy.py
+cs336_systems/weighted_sum.py
 
 
 # Unit test / coverage reports
