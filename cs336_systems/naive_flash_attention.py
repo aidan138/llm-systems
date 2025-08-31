@@ -1,5 +1,4 @@
 import torch
-# import triton.language as tl
 import math
 
 def cdiv(x, y):

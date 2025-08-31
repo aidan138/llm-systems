@@ -19,7 +19,8 @@ def flash_fwd_kernel(
     scale,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
-    K_TILE_SIZE: tl.constexpr
+    K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr
 ):
     query_tile_index = tl.program_id(0)
 
@@ -78,8 +79,17 @@ def flash_fwd_kernel(
     for i in tl.range(tl.cdiv(M_KEYS, K_TILE_SIZE)):
         
         k, v = tl.load(K_block_ptr, boundary_check=(0,1), padding_option='zero'), tl.load(V_block_ptr, boundary_check=(0,1), padding_option='zero')
-
+        
         scores = tl.dot(q, tl.trans(k, (1,0))) * scale
+        if is_causal:
+            n = Q_TILE_SIZE * query_tile_index
+            m = K_TILE_SIZE * i
+            q_range, k_range = tl.arange(0, Q_TILE_SIZE), tl.arange(0, K_TILE_SIZE)
+            q_range, k_range = q_range + n, k_range + m
+
+            mask = tl.where((q_range[:, None] < k_range[None, :]), -1e6, 0)
+            scores += mask
+
         m_new  = tl.maximum(m_running, tl.max(scores, axis=-1))
         
         rescale_factor = tl.exp(m_running - m_new)
@@ -99,7 +109,6 @@ def flash_fwd_kernel(
     tl.store(O_block_ptr, output.to(O_block_ptr.type.element_ty), boundary_check=(0,1))
 
 
-
 class FlashAttention(torch.autograd.Function):
 
     @staticmethod
@@ -115,6 +124,7 @@ class FlashAttention(torch.autograd.Function):
 
         ctx.Q_TILE_SIZE = 16 # TODO According to flashAttention2 these are tuneable
         ctx.K_TILE_SIZE = 16
+        ctx.is_causal = is_causal
         
         O = torch.empty_like(Q, device=Q.device)
         L = torch.empty(Q.shape[:-1], device=Q.device) # Log sum across rows
@@ -133,6 +143,7 @@ class FlashAttention(torch.autograd.Function):
             D = D,
             Q_TILE_SIZE = ctx.Q_TILE_SIZE,
             K_TILE_SIZE = ctx.K_TILE_SIZE,
+            is_causal = is_causal,
         )
         
         ctx.save_for_backward(L, Q, K, V, O)
