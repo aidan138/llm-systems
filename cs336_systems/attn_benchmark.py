@@ -1,4 +1,5 @@
 from cs336_basics.nn.layers import sdp_attention
+from cs336_systems.flash_attention import FlashAttention
 import itertools
 import argparse
 import torch
@@ -12,9 +13,9 @@ import gc
 ATTN_DIR = './attn_stats'
 os.makedirs(ATTN_DIR, exist_ok=True)
 
-bsz = 8
+bsz = 1
 head_dims = [16,32,64,128]
-seq_lens = [256, 1024, 4096, 8192, 16384] 
+seq_lens = [128 * 2**i for i in range(7)] 
 
 def print_mem(msg=""):
     torch.cuda.synchronize()
