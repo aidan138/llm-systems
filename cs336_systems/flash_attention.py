@@ -108,6 +108,22 @@ def flash_fwd_kernel(
     tl.store(L_block_ptr, L.to(L_block_ptr.type.element_ty), boundary_check=(0,))
     tl.store(O_block_ptr, output.to(O_block_ptr.type.element_ty), boundary_check=(0,1))
 
+@torch.compile()
+def flash_backward(Q, K, V, O, grad_O, L, is_causal):
+    scale = 1 / math.sqrt(Q.shape[-1])
+    S = Q @ K.transpose(-1,-2) * scale
+    if is_causal:
+        mask = torch.full(S.shape[-2:], float('-inf'), device=S.device).triu(diagonal=1)
+        S +=  mask
+    P = torch.exp(S - L.unsqueeze(-1))
+    dV = P.transpose(-1,-2) @ grad_O
+    dP = grad_O @ V.transpose(-1,-2)
+    D = torch.sum(O * grad_O, axis=-1, keepdim=True)
+    dS = P * (dP - D)
+    dQ = dS @ K * scale
+    dK = dS.transpose(-1,-2) @ Q * scale
+    return dQ, dK, dV
+
 
 class FlashAttention(torch.autograd.Function):
 
@@ -127,7 +143,7 @@ class FlashAttention(torch.autograd.Function):
         ctx.is_causal = is_causal
         
         O = torch.empty_like(Q, device=Q.device)
-        L = torch.empty(Q.shape[:-1], device=Q.device) # Log sum across rows
+        L = torch.empty(Q.shape[:-1], device=Q.device, requires_grad=False) # Log sum across rows
         scale = 1/math.sqrt(D)
 
         flash_fwd_kernel[(cdiv(n, ctx.Q_TILE_SIZE), math.prod(batch_dims))](
@@ -149,5 +165,9 @@ class FlashAttention(torch.autograd.Function):
         ctx.save_for_backward(L, Q, K, V, O)
         return O
 
-    def backward():
-        raise NotImplementedError
+    @staticmethod
+    def backward(ctx, dO):
+        L, Q, K, V, O = ctx.saved_tensors
+        dQ, dK, dV = flash_backward(Q, K, V, O, dO, L, ctx.is_causal)
+        return dQ, dK, dV, None
+    
