@@ -120,7 +120,7 @@ class FlashAttention(torch.autograd.Function):
         L = torch.empty(Q.shape[:-1], device=Q.device) # Log sum across rows
         scale = 1/math.sqrt(D)
 
-        flash_fwd_kernel[(cdiv(n, ctx.Q_TILE_SIZE), batch_dims[0])](
+        flash_fwd_kernel[(cdiv(n, ctx.Q_TILE_SIZE), math.prod(batch_dims))](
             Q, K, V,
             O, L,
             Q.stride(0), Q.stride(1), Q.stride(2),
