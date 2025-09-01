@@ -75,6 +75,8 @@ def run_dist_all_reduce(rank, world_size, protocol, memory, num_warmups=5):
 def main():
     num_iters = len(backends) * len(num_processes) * len(data_mem_size)
     for backend, world_size, memory in tqdm(product(backends, num_processes, data_mem_size), desc="Distributed Workloads", total=num_iters):
+        if memory == data_mem_size[-1] and backend == backends[0]:
+            continue
         print(f"\nRunning {backend} distributed {memory//1024**2}MB workload with world_size: {world_size}")
         mp.spawn(run_dist_all_reduce, args=(world_size, backend, memory), nprocs=world_size, join=True)
     
