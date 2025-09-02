@@ -71,7 +71,7 @@ def setup(rank, world_size, backend):
         
     else:
         device = 'cpu'
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    dist.init_process_group(backend, rank=rank, world_size=world_size, device_id=rank)
     return device
 
 def cleanup():
@@ -82,7 +82,7 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
     
     model = model_cls(model_args).to(device)
     data, targets = data.to(device), targets.to(device)
-    optimizer = AdamW(model.parameters(), lr=0.1)
+    optimizer = AdamW(model.parameters())
     print(f"Rank {rank} model parameters before broadcast: {list(model.parameters())[0]}")
 
     # Unify the parameters
@@ -98,15 +98,15 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
     
     iter_times, comm_times = [], []
     for step in range(num_steps):
-        iter_time, comm_time = ddp_train_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
+        comm_time, iter_time = ddp_train_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
         iter_times.append(iter_time)
         comm_times.append(comm_time)
 
     dist.barrier()
     
     # Take mean across iterations
-    iter_times = torch.tensor(iter_times).mean(dim=-1)
-    comm_times = torch.tensor(comm_times).mean(dim=-1)
+    iter_times = torch.tensor(iter_times, device=device).mean(dim=-1)
+    comm_times = torch.tensor(comm_times, device=device).mean(dim=-1)
 
     # Get full benchmark data
     all_ranks_iter_times = [torch.empty_like(iter_times) for _ in range(world_size)]
@@ -115,8 +115,8 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
     dist.all_gather(tensor_list=all_ranks_comm_times, tensor=comm_times)
     
     # Take mean across ranks 
-    rank_avg_iter = torch.tensor(all_ranks_iter_times).mean(dim=0) 
-    rank_avg_comm = torch.tensor(all_ranks_comm_times).mean(dim=0)
+    rank_avg_iter = torch.tensor(all_ranks_iter_times, device=device).mean(dim=0) 
+    rank_avg_comm = torch.tensor(all_ranks_comm_times, device=device).mean(dim=0)
     if rank == 0:
         row = dict(
             DDP_Type="Naive",
@@ -138,13 +138,13 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
 def main():
     print(model_specs)
     model_dict = model_specs.loc[model_size].to_dict()
-    max_batch_size = 64
-    max_seq_len = 128
+    max_batch_size = 16
+    max_seq_len = 32
     vocab_size=10000
     data_model_args = dict(
-        vocab_size=10000,
-        max_seq_len=128,
-        max_batch_size=64,
+        vocab_size=vocab_size,
+        max_seq_len=max_seq_len,
+        max_batch_size=max_batch_size,
     )
     model_dict.update(data_model_args)
     model_args = ModelArgs(**model_dict)
