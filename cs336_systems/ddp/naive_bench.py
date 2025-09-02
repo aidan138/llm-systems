@@ -9,6 +9,8 @@ from cs336_basics.nn.utils import cross_entropy_loss
 from cs336_basics.nn.optim import AdamW
 from timeit import default_timer
 
+SAVE_DIR = "./distributed_logs"
+os.makedirs(SAVE_DIR, exist_ok=True)
 MODEL_SPEC_PATH = './cs336_systems/model_specs.csv'
 model_specs = pd.read_csv(MODEL_SPEC_PATH).set_index('model')
 model_size = 'xl'
