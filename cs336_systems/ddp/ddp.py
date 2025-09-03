@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-import logging
 
 
 class DDPIndividualParameters(nn.Module):

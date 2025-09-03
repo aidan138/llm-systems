@@ -189,7 +189,7 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
             df = extend_dataframe(save_file, df)
             df.to_csv(save_file)
 
-        print("Results from training:\n")
+        print("Results from benchmarking:\n")
         print(df.to_markdown(index=False))
 
     cleanup()

@@ -54,10 +54,11 @@ def setup(rank, world_size, backend):
         else:
             raise ValueError
         device = f"cuda:{local_rank}"
+        torch.cuda.set_device(local_rank)
         
     else:
         device = 'cpu'
-    dist.init_process_group(backend, rank=rank, world_size=world_size, device_id=rank)
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
     return device
 
 def cleanup():
@@ -73,12 +74,13 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     
     local_batch = data[rank]
     local_targets = targets[rank]
-
+    print("Warming up")
     for _ in range(num_warmups):
         ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
 
     dist.barrier()
     
+    print("Benchmarking")
     iter_times = []
     for step in range(num_steps):
         iter_times.append(
@@ -96,7 +98,7 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     rank_avg_iter = torch.tensor(all_ranks_iter_times, device=device).mean(dim=0) 
     if rank == 0:
         row = dict(
-            DDP_Type="Reduced Comm",
+            DDP_Type="DDP Wrapped",
             Model_Size=model_size,
             Avg_Comm_Time_s=float('nan'),
             Avg_Iter_Time_s=rank_avg_iter.item()
@@ -106,7 +108,7 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
             df = extend_dataframe(save_file, df)
             df.to_csv(save_file)
 
-        print("Results from training:\n")
+        print("Results from benchmarking:\n")
         print(df.to_markdown(index=False))
 
     dist.barrier()
