@@ -25,6 +25,8 @@ def extend_dataframe(save_file, df):
 
 
 def ddp_train_step(rank, world_size, data, targets, model, optimizer):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = default_timer()
     batch_size = data.size(0)
     local_batch_size = batch_size // world_size
@@ -37,58 +39,73 @@ def ddp_train_step(rank, world_size, data, targets, model, optimizer):
     optimizer.zero_grad()
     loss.backward()
     if rank == 0: print(loss.item())
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     comm_start = default_timer()
     with torch.no_grad():
         for param in model.parameters():
             if param.grad is not None:
                 # Perform all reduce average reduction to average gradients
                 dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG, async_op=False)
-    dist.barrier()
+    
+    if torch.cuda.is_available():
+            torch.cuda.synchronize()
     comm_end = default_timer()
 
     # Step with the averaged gradients
     optimizer.step()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     end = default_timer()
-    synchronize()
+    dist.barrier()
     return comm_end-comm_start, end-start
 
 def ddp_reduced_com_step(rank, world_size, data, targets, model, optimizer):
+    # Setup variables and synchronize gpu
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = default_timer()
     batch_size = data.size(0)
     local_batch_size = batch_size // world_size
     offset = rank*local_batch_size
     local_data = data[offset:offset+local_batch_size, ...]
     local_targets = targets[offset:offset+local_batch_size, ...]
+
+    # Forward and backward pass
     logits = model(local_data)
     loss = cross_entropy_loss(logits, local_targets)
     print(f"loss is {loss.item()}")
     optimizer.zero_grad()
     loss.backward()
     if rank == 0: print(loss.item())
-    comm_start = default_timer()
+
+    
+    # Communicate the gradient
     with torch.no_grad():
         grads_list = list(param.grad for param in model.parameters())
         flat_grads = torch._utils._flatten_dense_tensors(grads_list)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        comm_start = default_timer()
         # Perform all reduce average reduction to average gradients
         dist.all_reduce(tensor=flat_grads, op=dist.ReduceOp.AVG, async_op=False)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        comm_end = default_timer()
         grads_list = torch._utils._unflatten_dense_tensors(flat_grads, grads_list)
         
         for param, grad in zip(model.parameters(), grads_list):
             param.grad.copy_(grad)
 
-    dist.barrier()
-    comm_end = default_timer()
-
     # Step with the averaged gradients
     optimizer.step()
-    end = default_timer()
-    synchronize()
-    return comm_end-comm_start, end-start
 
-def synchronize():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    end = default_timer()
+
     dist.barrier()
+    return comm_end-comm_start, end-start
 
 def setup(rank, world_size, backend):
     os.environ["MASTER_ADDR"] = 'localhost'

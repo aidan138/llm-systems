@@ -1,2 +1,3 @@
-,DDP_Type,Model_Size,Avg_Comm_Time_s,Avg_Iter_Time_s
-0,Naive,xl,0.0533500611782074,0.4779677391052246
+DDP_Type,Model_Size,Avg_Comm_Time_s,Avg_Iter_Time_s
+Naive,xl,0.023292217403650284,0.48691368103027344
+Reduced Comm,xl,0.0115974666550755,0.4882352948188782
