@@ -1,6 +1,6 @@
 import argparse
 import torch
-from cs336_systems.flash_attention import FlashAttention
+from cs336_systems.flash_attention.flash_attention import FlashAttention
 from cs336_basics.nn.layers import sdp_attention
 from triton.testing import do_bench
 import itertools

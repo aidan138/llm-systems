@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Type
 
 import torch
-from cs336_systems.naive_flash_attention import FlashAttention as tmp
-from cs336_systems.flash_attention import FlashAttention
+from cs336_systems.flash_attention.naive_flash_attention import FlashAttention as tmp
+from cs336_systems.flash_attention.flash_attention import FlashAttention
 
 
 def get_flashattention_autograd_function_pytorch() -> Type:

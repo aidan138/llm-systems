@@ -125,13 +125,13 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
     print(f"\nRank {rank} model parameters after broadcast: {list(model.parameters())[0]}")
 
     for _ in range(num_warmups):
-        ddp_train_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
+        ddp_reduced_com_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
 
     dist.barrier()
     
     iter_times, comm_times = [], []
     for step in range(num_steps):
-        comm_time, iter_time = ddp_train_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
+        comm_time, iter_time = ddp_reduced_com_step(rank=rank, world_size=world_size, data=data, targets=targets, model=model, optimizer=optimizer)
         iter_times.append(iter_time)
         comm_times.append(comm_time)
 
@@ -152,7 +152,7 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
     rank_avg_comm = torch.tensor(all_ranks_comm_times, device=device).mean(dim=0)
     if rank == 0:
         row = dict(
-            DDP_Type="Naive",
+            DDP_Type="Reduced Comm",
             Model_Size=model_size,
             Avg_Comm_Time_s=rank_avg_comm.item(),
             Avg_Iter_Time_s=rank_avg_iter.item()
