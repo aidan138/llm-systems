@@ -132,7 +132,7 @@ def main():
         max_batch_size = 16
         max_seq_len = 32
         vocab_size=10000
-        num_layers=model_dict[model_size]['num_layers']
+        num_layers=model_specs.loc[model_size]['num_layers']
     else:
         # NOTE these constraints were derived for local testing
         backend = "gloo"
