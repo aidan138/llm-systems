@@ -130,7 +130,6 @@ class FlashAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
         n, m = Q.shape[-2], K.shape[-2]
-        batch_dims = Q.shape[:-2]
         D = Q.shape[-1]
 
         assert Q.shape[-1] == K.shape[-1] == V.shape[-1] == D, "Embedding dimension mismatch"
@@ -141,12 +140,17 @@ class FlashAttention(torch.autograd.Function):
         ctx.Q_TILE_SIZE = 16 # TODO According to flashAttention2 these are tuneable
         ctx.K_TILE_SIZE = 16
         ctx.is_causal = is_causal
+        Q_shape, KV_shape = Q.shape, K.shape
+        ctx.orig_shapes = (Q_shape, KV_shape)
         
+        batch_dim = Q.size(0)
+        Q, K, V = Q.view(-1, n, D), K.view(-1, m, D), V.view(-1,m, D)
+
         O = torch.empty_like(Q, device=Q.device)
         L = torch.empty(Q.shape[:-1], device=Q.device, requires_grad=False) # Log sum across rows
         scale = 1/math.sqrt(D)
 
-        flash_fwd_kernel[(cdiv(n, ctx.Q_TILE_SIZE), math.prod(batch_dims))](
+        flash_fwd_kernel[(cdiv(n, ctx.Q_TILE_SIZE), batch_dim)](
             Q, K, V,
             O, L,
             Q.stride(0), Q.stride(1), Q.stride(2),
@@ -163,11 +167,13 @@ class FlashAttention(torch.autograd.Function):
         )
         
         ctx.save_for_backward(L, Q, K, V, O)
-        return O
+        return O.reshape(Q_shape)
 
     @staticmethod
     def backward(ctx, dO):
         L, Q, K, V, O = ctx.saved_tensors
+        dO = dO.reshape(O.shape)
+        Q_shape, KV_shape = ctx.orig_shapes
         dQ, dK, dV = flash_backward(Q, K, V, O, dO, L, ctx.is_causal)
-        return dQ, dK, dV, None
+        return dQ.reshape(Q_shape), dK.reshape(KV_shape), dV.reshape(KV_shape), None
     
