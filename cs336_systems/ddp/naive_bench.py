@@ -8,6 +8,8 @@ from cs336_basics.args import ModelArgs
 from cs336_basics.nn.utils import cross_entropy_loss
 from cs336_basics.nn.optim import AdamW
 from timeit import default_timer
+from torch.cuda import nvtx
+from cs336_systems.ddp.nvtx import push_nvtx, pop_nvtx
 
 SAVE_DIR = "./distributed_logs"
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -23,7 +25,7 @@ def extend_dataframe(save_file, df):
         df = pd.concat([old, df])
     return df
 
-
+@nvtx.range("Training step")
 def ddp_train_step(rank, world_size, data, targets, model, optimizer):
     # Setup variables and synchronize gpu
     if torch.cuda.is_available():
@@ -36,11 +38,10 @@ def ddp_train_step(rank, world_size, data, targets, model, optimizer):
     local_targets = targets[offset:offset+local_batch_size, ...]
 
     # Forward and backward pass
-    logits = model(local_data)
-    loss = cross_entropy_loss(logits, local_targets)
-    print(f"loss is {loss.item()}")
+    push_nvtx("forward");logits = model(local_data); pop_nvtx()
+    push_nvtx("loss"); loss = cross_entropy_loss(logits, local_targets); pop_nvtx()
     optimizer.zero_grad()
-    loss.backward()
+    push_nvtx("backward");loss.backward(); pop_nvtx()
     if rank == 0: print(loss.item())
     
     # Communicate the gradients
@@ -48,6 +49,7 @@ def ddp_train_step(rank, world_size, data, targets, model, optimizer):
         torch.cuda.synchronize()
     comm_start = default_timer()
     
+    push_nvtx("communication")
     with torch.no_grad():
         for param in model.parameters():
             if param.grad is not None:
@@ -56,11 +58,12 @@ def ddp_train_step(rank, world_size, data, targets, model, optimizer):
     
     if torch.cuda.is_available():
             torch.cuda.synchronize()
+    pop_nvtx()
 
     comm_end = default_timer()
 
     # Step with the averaged gradients
-    optimizer.step()
+    push_nvtx("optimizer step"); optimizer.step(); pop_nvtx()
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -187,7 +190,7 @@ def timed_naive_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor
         df = pd.DataFrame([row])
         if save_file:
             df = extend_dataframe(save_file, df)
-            df.to_csv(save_file)
+            df.to_csv(save_file, index=False)
 
         print("Results from benchmarking:\n")
         print(df.to_markdown(index=False))

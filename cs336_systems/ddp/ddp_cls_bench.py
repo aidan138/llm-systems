@@ -9,12 +9,17 @@ from cs336_basics.nn.utils import cross_entropy_loss
 from cs336_basics.nn.optim import AdamW
 from timeit import default_timer
 from cs336_systems.ddp.ddp import DDPIndividualParameters
+from torch.cuda import nvtx
+from cs336_systems.ddp.nvtx import push_nvtx, pop_nvtx
+import logging
 
 SAVE_DIR = "./distributed_logs"
 os.makedirs(SAVE_DIR, exist_ok=True)
 MODEL_SPEC_PATH = './cs336_systems/model_specs.csv'
 model_specs = pd.read_csv(MODEL_SPEC_PATH).set_index('model')
 model_size = 'xl'
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 def extend_dataframe(save_file, df):
@@ -24,17 +29,18 @@ def extend_dataframe(save_file, df):
         df = pd.concat([old, df])
     return df
 
-def ddp_step(ddp_model, optimizer, local_batch, local_targets):
+@nvtx.range("Step computation")
+def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local_batch: torch.Tensor, local_targets: torch.Tensor):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     iter_start = default_timer()
     
     # Forward and backward pass
-    logits = ddp_model(local_batch)
-    loss = cross_entropy_loss(logits, local_targets)
+    push_nvtx("forward"); logits = ddp_model(local_batch); pop_nvtx()
+    push_nvtx("loss"); loss = cross_entropy_loss(logits, local_targets); pop_nvtx()
     optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    push_nvtx("backward pass"); loss.backward(); pop_nvtx()
+    push_nvtx("optimizer step"); optimizer.step(); pop_nvtx
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -74,13 +80,13 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     
     local_batch = data[rank]
     local_targets = targets[rank]
-    print("Warming up")
+    logging.info("Warming up")
     for _ in range(num_warmups):
         ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
 
     dist.barrier()
     
-    print("Benchmarking")
+    logging.info("Benchmarking")
     iter_times = []
     for step in range(num_steps):
         iter_times.append(
@@ -106,10 +112,10 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
         df = pd.DataFrame([row])
         if save_file:
             df = extend_dataframe(save_file, df)
-            df.to_csv(save_file)
+            df.to_csv(save_file, index=False)
 
-        print("Results from benchmarking:\n")
-        print(df.to_markdown(index=False))
+        logging.info("Results from benchmarking:\n")
+        logging.info(df.to_markdown(index=False))
 
     dist.barrier()
     cleanup()
@@ -133,19 +139,21 @@ def main():
         max_batch_size = 2
         max_seq_len = 4
         vocab_size=100
+        num_layers = 2
 
-    print(model_specs)
+    logging.info(model_specs)
     model_dict = model_specs.loc[model_size].to_dict()
     
     data_model_args = dict(
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
+        num_layers=num_layers
     )
     model_dict.update(data_model_args)
     model_args = ModelArgs(**model_dict)
 
-    print(backend)
+    logging.debug(backend)
     data = torch.randint(0, vocab_size, (max_batch_size*world_size, max_seq_len+1))
     # construct dummy training batch
     X = data[:, :-1]

@@ -85,7 +85,7 @@ def main(save_path: str):
         prev_res = pd.read_csv(save_path)
         df = pd.concat([prev_res, df], ignore_index=True)
     if save_path:
-        df.to_csv(save_path)
+        df.to_csv(save_path, index=False)
     print('Results\n', df.to_markdown())
     
 
