@@ -29,7 +29,7 @@ def extend_dataframe(save_file, df):
         df = pd.concat([old, df])
     return df
 
-@nvtx.range("Step computation")
+@nvtx.range("Training step")
 def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local_batch: torch.Tensor, local_targets: torch.Tensor):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -132,6 +132,7 @@ def main():
         max_batch_size = 16
         max_seq_len = 32
         vocab_size=10000
+        num_layers=model_dict[model_size]['num_layers']
     else:
         # NOTE these constraints were derived for local testing
         backend = "gloo"
