@@ -8,16 +8,18 @@ from cs336_basics.args import ModelArgs
 from cs336_basics.nn.utils import cross_entropy_loss
 from cs336_basics.nn.optim import AdamW
 from timeit import default_timer
-from cs336_systems.ddp.ddp import DDPIndividualParameters
+from cs336_systems.ddp.ddp import DDPIndividualParameters, DDPBucketed
 from torch.cuda import nvtx
 from cs336_systems.ddp.nvtx import push_nvtx, pop_nvtx
 import logging
+from torch.profiler import ProfilerActivity
 
 SAVE_DIR = "./distributed_logs"
 os.makedirs(SAVE_DIR, exist_ok=True)
 MODEL_SPEC_PATH = './cs336_systems/model_specs.csv'
 model_specs = pd.read_csv(MODEL_SPEC_PATH).set_index('model')
 model_size = 'xl'
+SIZES = [1, 10, 100, 1000]
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -28,6 +30,16 @@ def extend_dataframe(save_file, df):
         old = pd.read_csv(save_file)
         df = pd.concat([old, df])
     return df
+
+def print_mem(prefix=""):
+    if not torch.cuda.is_available():
+        print(prefix + " (cpu only)")
+        return
+    torch.cuda.synchronize()
+    alloc = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    peak = torch.cuda.max_memory_allocated()
+    print(f"{prefix} alloc={alloc:,} bytes reserved={reserved:,} peak={peak:,}")
 
 @nvtx.range("Training step")
 def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local_batch: torch.Tensor, local_targets: torch.Tensor):
@@ -40,7 +52,8 @@ def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local
     push_nvtx("loss"); loss = cross_entropy_loss(logits, local_targets); pop_nvtx()
     optimizer.zero_grad()
     push_nvtx("backward pass"); loss.backward(); pop_nvtx()
-    push_nvtx("optimizer step"); optimizer.step(); pop_nvtx
+    ddp_model.finish_gradient_synchronization()
+    push_nvtx("optimizer step"); optimizer.step(); pop_nvtx()
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -70,20 +83,30 @@ def setup(rank, world_size, backend):
 def cleanup():
     dist.destroy_process_group()
 
-def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targets: torch.Tensor, model_cls: torch.nn.Module, model_args: ModelArgs, save_file=None, num_steps: int=10, num_warmups: int = 5):
+def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targets: torch.Tensor, model_cls: torch.nn.Module, model_args: ModelArgs, bucket_size_mb: int, save_file=None, num_steps: int=10, num_warmups: int = 5):
     device = setup(rank, world_size, backend)
     
     model = model_cls(model_args).to(device)
-    ddp_model = DDPIndividualParameters(model)
+    ddp_model = DDPBucketed(model, bucket_size_mb=bucket_size_mb)
     data, targets = torch.chunk(data.to(device), world_size, dim=0), torch.chunk(targets.to(device), world_size, dim=0)
     optimizer = AdamW(ddp_model.parameters())
     
     local_batch = data[rank]
     local_targets = targets[rank]
     logging.info("Warming up")
-    for _ in range(num_warmups):
-        ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
-
+    with torch.profiler.profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        with_stack=True,
+        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)
+    ) as prof:
+        for i in range(num_warmups):
+            print_mem(f"rank {rank} before warmup {i}: ")
+            ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
+            print_mem(f"rank {rank} after warmup {i}: ")
+    table = prof.key_averages().table(sort_by="cuda_time_total",
+                                      max_name_column_width=80,
+                                      row_limit=10)
+    print(table)
     dist.barrier()
     
     logging.info("Benchmarking")
@@ -104,7 +127,7 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     rank_avg_iter = torch.tensor(all_ranks_iter_times, device=device).mean(dim=0) 
     if rank == 0:
         row = dict(
-            DDP_Type="DDP Wrapped",
+            DDP_Type=f"DDP Wrapped ({bucket_size_mb} MB buckets)",
             Model_Size=model_size,
             Avg_Comm_Time_s=float('nan'),
             Avg_Iter_Time_s=rank_avg_iter.item()
@@ -159,7 +182,8 @@ def main():
     # construct dummy training batch
     X = data[:, :-1]
     y = data[:, 1:]
-    mp.spawn(timed_ddp, args=(world_size, backend, X, y, TransformerLM, model_args, save_file), nprocs=world_size)
+    for size in SIZES:
+        mp.spawn(timed_ddp, args=(world_size, backend, X, y, TransformerLM, model_args, size, save_file), nprocs=world_size)
     
 
 if __name__ == '__main__':
