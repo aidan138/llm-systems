@@ -131,7 +131,8 @@ class RoPE(nn.Module):
         return (R_mats @ x).squeeze(-1).view(*batch_dim, N, D)
 
 def sdp_attention(Q: Tensor, K: Tensor, V: Tensor, mask: Tensor | None = None):
-    batch, *rest, seq_len, feat_dim = Q.shape # 
+    feat_dim = Q.shape[-1]
+    input_shape = Q.shape
     # Note works for a two different sequence lengths
     # Therefore you can decide to determine attention attending from two diff sequences
     # For a autoregressive SA it will always be same source though
@@ -140,7 +141,7 @@ def sdp_attention(Q: Tensor, K: Tensor, V: Tensor, mask: Tensor | None = None):
         sim_matrix = torch.where(condition=mask, input=sim_matrix, other=float('-inf'))
     prob_matrix = softmax(sim_matrix, dim=-1)
     
-    return  (prob_matrix @ V).view(batch, *rest, -1, feat_dim) # Returns B, ..., n, feat_dim
+    return  (prob_matrix @ V).view(input_shape) # Returns B, ..., n, feat_dim
 
 class Multiheaded_Self_Attention(nn.Module):
 
@@ -180,7 +181,7 @@ class Parallel_Multiheaded_Self_Attention(nn.Module):
         super().__init__()
         self.head_dim = model_args.d_model // model_args.num_heads
         self.num_heads = model_args.num_heads
-        self.kqv_proj = nn.Parameter(torch.stack([Linear(self.head_dim*self.num_heads, model_args.d_model).weight.data for _ in range(3)], dim=0))
+        self.kqv_proj = Linear(model_args.d_model, 3*self.head_dim*model_args.num_kv_heads)
         self.output_proj = Linear(model_args.d_model, model_args.d_model)
         self.num_kv_heads = self.num_heads if model_args.num_kv_heads is None else model_args.num_kv_heads
         self.max_batch_size = model_args.max_batch_size
@@ -202,20 +203,13 @@ class Parallel_Multiheaded_Self_Attention(nn.Module):
 
     def forward(self, x: Tensor, positional_embeddings: RoPE = None, start_pos:int = 0):
         batch_size, seq_len, d_model = x.shape
-        # Combined K,Q,V into a single KQV (3, num_head * head_dim, d_model) matrix reducing everything to a single matrix multiply
-        # by leveraging broadcasting to perform serial actions
-        # 1st permute performs the transpose of all the matrices
-        # Unsqueezing the input sequence dimension(batch, 1, seq_length, d_model) allowed for the seq_length, d_model matrices
-        # to be broadcasted to the 3 KQV dims.
-        # Unsqueezing the KQV (1, 3, num_head * head_dim, d_model) allowed for the KQV to be broadcasted across all batches
-        transformed = (x.unsqueeze(-3) @ self.kqv_proj.permute((0,2,1)).unsqueeze(0)).permute(1,0,2,3)
+        # Combined K,Q,V into a single KQV (d_model, 3* num_head * head_dim) matrix reducing projections to a single matmul
+        query, key, value = torch.chunk(self.kqv_proj(x), 3, dim=-1) # Each chunk would be b,n,head_dim*num_heads
         
-        # We get an output from the matmul of batch_size, seq_len, num_heads * head_dim
-        # We then view for batch_size, seq_len, num_heads, head_dim
-        # Finally permute the head dim to the front so that you are processing all heads in parallel as if separate modules
-        query = transformed[0].reshape(batch_size, seq_len, self.num_heads, -1).permute((2,0,1,3))
-        key = transformed[1].reshape(batch_size, seq_len, self.num_kv_heads, -1).permute((2,0,1,3))
-        value = transformed[2].reshape(batch_size, seq_len, self.num_kv_heads, -1).permute((2,0,1,3))
+        # Finally permute the head dim to the front to treat it the same as a batch dim
+        query = query.reshape(batch_size, seq_len, self.num_heads, -1).permute((2,0,1,3))
+        key = key.reshape(batch_size, seq_len, self.num_kv_heads, -1).permute((2,0,1,3))
+        value = value.reshape(batch_size, seq_len, self.num_kv_heads, -1).permute((2,0,1,3))
 
         last_pos = start_pos + seq_len
         token_positions = torch.arange(start_pos, last_pos)
