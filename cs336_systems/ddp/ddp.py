@@ -58,7 +58,7 @@ class DDPBucketed(nn.Module):
             bucket_flat_grad = self.flat_grads[i] # Flat gradients for the parameters
             bucket_grads_list = torch._utils._unflatten_dense_tensors(bucket_flat_grad, bucket_params)
             for param, grad in zip(bucket_params, bucket_grads_list):
-                # Copy the reduce-all avg gradients in place
+                # Copy the all-reduce avg gradients in place
                 param.grad.copy_(grad)
 
         # Clear handles for next set of communication calls

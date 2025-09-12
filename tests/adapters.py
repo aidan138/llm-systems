@@ -6,6 +6,7 @@ import torch
 from cs336_systems.flash_attention.naive_flash_attention import FlashAttention as tmp
 from cs336_systems.flash_attention.flash_attention import FlashAttention
 from cs336_systems.ddp.ddp import DDPIndividualParameters, DDPBucketed
+from cs336_systems.ddp.sdp import OSDP
 
 
 def get_flashattention_autograd_function_pytorch() -> Type:
@@ -136,4 +137,4 @@ def get_sharded_optimizer(params, optimizer_cls: Type[torch.optim.Optimizer], **
     Returns:
         Instance of sharded optimizer.
     """
-    raise NotImplementedError
+    return OSDP(params=params, optimizer_cls=optimizer_cls, **kwargs)

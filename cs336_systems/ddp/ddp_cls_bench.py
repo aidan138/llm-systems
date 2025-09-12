@@ -94,28 +94,37 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     local_batch = data[rank]
     local_targets = targets[rank]
     logging.info("Warming up")
-    with torch.profiler.profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        with_stack=True,
-        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)
-    ) as prof:
-        for i in range(num_warmups):
-            print_mem(f"rank {rank} before warmup {i}: ")
-            ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
-            print_mem(f"rank {rank} after warmup {i}: ")
-    table = prof.key_averages().table(sort_by="cuda_time_total",
-                                      max_name_column_width=80,
-                                      row_limit=10)
-    print(table)
+    for i in range(num_warmups):
+        print_mem(f"rank {rank} before warmup {i}: ")
+        ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
+        print_mem(f"rank {rank} after warmup {i}: ")
     dist.barrier()
     
     logging.info("Benchmarking")
     iter_times = []
-    for step in range(num_steps):
-        iter_times.append(
-            ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
-        )
-            
+    with torch.profiler.profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+        profile_memory=True,
+        record_shapes=True,
+        with_stack=True
+    ) as prof:
+        for step in range(num_steps):
+            iter_times.append(
+                ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
+            )
+    
+    ka = prof.key_averages()
+    table = ka.table(sort_by="cuda_time_total",
+                                      max_name_column_width=80,
+                                      row_limit=50)
+    
+    if rank == 0:
+        print("\nRank", rank, "-Table:")
+        print(table)
+        prof.export_chrome_trace(f"./trace_{bucket_size_mb}mb.json")
+        print("="*80)
+
     # Take mean across iterations
     iter_times = torch.tensor(iter_times, device=device).mean(dim=-1)
 
