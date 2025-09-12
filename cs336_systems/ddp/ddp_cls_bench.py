@@ -7,12 +7,15 @@ from cs336_basics.nn.layers import TransformerLM
 from cs336_basics.args import ModelArgs
 from cs336_basics.nn.utils import cross_entropy_loss
 from cs336_basics.nn.optim import AdamW
+from cs336_systems.ddp.sdp import OSDP
 from timeit import default_timer
 from cs336_systems.ddp.ddp import DDPIndividualParameters, DDPBucketed
 from torch.cuda import nvtx
 from cs336_systems.ddp.nvtx import push_nvtx, pop_nvtx
 import logging
 from torch.profiler import ProfilerActivity
+from argparse import ArgumentParser
+from typing import Any
 
 SAVE_DIR = "./distributed_logs"
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -36,10 +39,12 @@ def print_mem(prefix=""):
         print(prefix + " (cpu only)")
         return
     torch.cuda.synchronize()
-    alloc = torch.cuda.memory_allocated()
-    reserved = torch.cuda.memory_reserved()
-    peak = torch.cuda.max_memory_allocated()
-    print(f"{prefix} alloc={alloc:,} bytes reserved={reserved:,} peak={peak:,}")
+    alloc = torch.cuda.memory_allocated()/1024**2
+    reserved = torch.cuda.memory_reserved()/1024**2
+    peak = torch.cuda.max_memory_allocated()/1024**2
+    print(f"{prefix} alloc={alloc:,} Mbytes | reserved={reserved:,} Mbytes | peak={peak:,} Mbytes")
+    torch.cuda.reset_peak_memory_stats()
+    return alloc, reserved, peak
 
 @nvtx.range("Training step")
 def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local_batch: torch.Tensor, local_targets: torch.Tensor):
@@ -53,13 +58,15 @@ def ddp_step(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer, local
     optimizer.zero_grad()
     push_nvtx("backward pass"); loss.backward(); pop_nvtx()
     ddp_model.finish_gradient_synchronization()
+    _, _, peak_pre_optim = print_mem("Pre-optimizer step")
     push_nvtx("optimizer step"); optimizer.step(); pop_nvtx()
+    _, _, peak_post_optim = print_mem("Post-optimizer step")
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     iter_end = default_timer()
 
-    return iter_end - iter_start
+    return (iter_end - iter_start), peak_pre_optim, peak_post_optim
 
 
 def setup(rank, world_size, backend):
@@ -83,21 +90,46 @@ def setup(rank, world_size, backend):
 def cleanup():
     dist.destroy_process_group()
 
-def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targets: torch.Tensor, model_cls: torch.nn.Module, model_args: ModelArgs, bucket_size_mb: int, save_file=None, num_steps: int=10, num_warmups: int = 5):
+def timed_ddp(
+        rank: int,
+        world_size: int,
+        backend: str,
+        data: torch.Tensor,
+        targets: torch.Tensor,
+        model_cls: torch.nn.Module,
+        model_args: ModelArgs,
+        config: dict[str, Any]
+        ):
+        
+    # Setup the distributed backend
     device = setup(rank, world_size, backend)
+
+    bucket_size_mb = config.get("bucket_size_mb")
+    shard_optimizer = config.get("shard_optimizer", False)
+    save_file = config.get("save_file")
+    track_mem = config.get("track_mem", False)
+    torch_profile = config.get("torch_profile", False)
+    num_steps = config.get("num_steps", 10)
+    num_warmups = config.get("num_warmups", 5)
     
+    # Initialize the model and optimizer
     model = model_cls(model_args).to(device)
-    ddp_model = DDPBucketed(model, bucket_size_mb=bucket_size_mb)
+    ddp_model = (DDPBucketed(model, bucket_size_mb=bucket_size_mb) if bucket_size_mb else DDPIndividualParameters(model))
     data, targets = torch.chunk(data.to(device), world_size, dim=0), torch.chunk(targets.to(device), world_size, dim=0)
-    optimizer = AdamW(ddp_model.parameters())
+    optimizer = OSDP(ddp_model.parameters(), AdamW) if shard_optimizer else AdamW(ddp_model.parameters())
+    logging.info(f"Created {type(ddp_model)} model with {sum(param.numel() for param in ddp_model.parameters())} Parameters and {type(optimizer)} optimizer")
+
+    # To track peak memory usage
+    peak_init, peak_pre_optim, peak_post_optim = 0, 0, 0
+
+    _,_, peak_init = print_mem("Initialized model")
     
+    # For DDP
     local_batch = data[rank]
     local_targets = targets[rank]
     logging.info("Warming up")
     for i in range(num_warmups):
-        print_mem(f"rank {rank} before warmup {i}: ")
         ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
-        print_mem(f"rank {rank} after warmup {i}: ")
     dist.barrier()
     
     logging.info("Benchmarking")
@@ -110,16 +142,27 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
         with_stack=True
     ) as prof:
         for step in range(num_steps):
+            iter_time, tmp_pre_optim, tmp_post_optim = ddp_step(
+                                                            ddp_model=ddp_model,
+                                                            optimizer=optimizer,
+                                                            local_batch=local_batch,
+                                                            local_targets=local_targets
+                                                        )
+            
+            peak_pre_optim = max(tmp_pre_optim, peak_pre_optim)
+            peak_post_optim = max(tmp_post_optim, peak_post_optim)
+
             iter_times.append(
-                ddp_step(ddp_model=ddp_model, optimizer=optimizer, local_batch=local_batch, local_targets=local_targets)
+                iter_time
             )
-    
-    ka = prof.key_averages()
-    table = ka.table(sort_by="cuda_time_total",
-                                      max_name_column_width=80,
-                                      row_limit=50)
-    
-    if rank == 0:
+
+    # Print out profiling details        
+    if torch_profile and rank == 0:
+        ka = prof.key_averages()
+        table = ka.table(sort_by="cuda_time_total",
+                                        max_name_column_width=80,
+                                        row_limit=50)
+        
         print("\nRank", rank, "-Table:")
         print(table)
         prof.export_chrome_trace(f"./trace_{bucket_size_mb}mb.json")
@@ -134,14 +177,24 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
     
     # Take mean across ranks 
     rank_avg_iter = torch.tensor(all_ranks_iter_times, device=device).mean(dim=0) 
+    DDP_Type = f"{backend} DDP Wrapped"
+    DDP_Type += (f" ({bucket_size_mb} MB buckets)" if bucket_size_mb else "")
+    DDP_Type += (f" Sharded Optimizer" if shard_optimizer else "")
     if rank == 0:
         row = dict(
-            DDP_Type=f"DDP Wrapped ({bucket_size_mb} MB buckets)",
+            DDP_Type=DDP_Type,
             Model_Size=model_size,
             Avg_Comm_Time_s=float('nan'),
-            Avg_Iter_Time_s=rank_avg_iter.item()
+            Avg_Iter_Time_s=rank_avg_iter.item(),
         )
+        row = (row | dict(
+                Peak_Init_Mem_mb=peak_init,
+                Peak_Pre_Optim_Mem_mb=peak_pre_optim,
+                Peak_Post_Optim_Mem_mb=peak_post_optim,
+            ) if track_mem else row)
         df = pd.DataFrame([row])
+        
+        # Save the dataframe
         if save_file:
             df = extend_dataframe(save_file, df)
             df.to_csv(save_file, index=False)
@@ -156,6 +209,15 @@ def timed_ddp(rank: int, world_size: int, backend: str, data: torch.Tensor, targ
 def main():
     save_file = './distributed_logs/ddp_benchmarks.csv'
     world_size=2
+    parser = ArgumentParser()
+    parser.add_argument("--shard-optim", type=bool, default=True)
+    parser.add_argument("--buckets", type=bool, default=False)
+    parser.add_argument("--track-mem", type=bool, default=True)
+    parser.add_argument("--torch-prof", type=bool, default=False)
+    parser.add_argument("--num-steps", type=int, default=10)
+    parser.add_argument("--num-warmups", type=int, default=5)
+
+    args = parser.parse_args()
 
     # NOTE these specifications are for 2 GPUs (80GB/device) setup to fit within memory
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
@@ -191,9 +253,22 @@ def main():
     # construct dummy training batch
     X = data[:, :-1]
     y = data[:, 1:]
-    for size in SIZES:
-        mp.spawn(timed_ddp, args=(world_size, backend, X, y, TransformerLM, model_args, size, save_file), nprocs=world_size)
-    
+    config = {
+        "bucket_size_mb" : None, # Determines whether to use bucketed DDP
+        "shard_optimizer" : args.shard_optim,
+        "save_file": save_file,
+        "track_mem": args.track_mem,
+        "torch_profile": args.torch_prof,
+        "num_steps": args.num_steps,
+        "num_warmups": args.num_warmups
+    }
+    if args.buckets:
+        for size_mb in SIZES:
+            config["bucket_size_mb"] = size_mb
+            mp.spawn(timed_ddp, args=(world_size, backend, X, y, TransformerLM, model_args, config), nprocs=world_size)
+    else:
+        mp.spawn(timed_ddp, args=(world_size, backend, X, y, TransformerLM, model_args, config), nprocs=world_size)
+
 
 if __name__ == '__main__':
     main()
